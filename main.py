@@ -2,6 +2,9 @@ from flask import Flask, request, jsonify
 import time
 import re
 import threading
+import requests
+
+RESEND_API_KEY = "re_67gvWUmb_3wHCTZ45Cy3W6StydigYZQDD"
 
 app = Flask(__name__)
 
@@ -72,15 +75,34 @@ def compute_building_level():
 # Yardımcı: E-mail gönderme (şimdilik stub, gerçek SMTP / provider ekleyebilirsin)
 # -------------------------------------------------------------------
 def send_email(to_email: str, subject: str, body: str):
+    url = "https://api.resend.com/emails"
+
+    html_body = f"""
+    <div style="font-family:Arial; padding:20px;">
+        <h2 style="color:#1a73e8;">{subject}</h2>
+        <p style="font-size:15px; color:#333; line-height:1.5;">
+            {body.replace("\n", "<br>")}
+        </p>
+        <p style="font-size:13px; color:#888;">Gesendet von <b>bib.</b></p>
+    </div>
     """
-    Buraya gerçek SMTP veya bir e-mail provider (Sendgrid, Mailgun vs.) entegre edebilirsin.
-    Şimdilik sadece log basıyor.
-    """
-    print("\n=== E-MAIL GÖNDERİLİYOR ===")
-    print("To:", to_email)
-    print("Subject:", subject)
-    print("Body:\n", body)
-    print("=== /E-MAIL ===\n")
+
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "from": "bib <no-reply@bib-app.com>",
+            "to": to_email,
+            "subject": subject,
+            "html": html_body
+        }
+    )
+
+    print("Resend yanıtı:", response.status_code, response.text)
+
 
 
 # -------------------------------------------------------------------
