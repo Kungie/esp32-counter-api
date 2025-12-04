@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import time
 import re
+import threading
 
 app = Flask(__name__)
 
@@ -20,7 +21,8 @@ latest_measurements = {}
 #   "created_at": 1700000000.0,
 #   "expires_at": 1700010800.0,
 #   "is_active": True,
-#   "triggered_at": None
+#   "triggered_at": None,
+#   "starting_level": 3
 # }
 alerts = []
 _next_alert_id = 1
@@ -28,6 +30,62 @@ _next_alert_id = 1
 EMAIL_REGEX = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 
 
+# -------------------------------------------------------------------
+# Yardımcı: Bina için "kademe" hesapla (1–5)
+# Bu tamamen örnek eşikler; kendine göre ayarla.
+# -------------------------------------------------------------------
+def compute_building_level():
+    """
+    Tüm sensörlerin toplam device_count'ından 1–5 arası bir kademe üretir.
+    Eşikler tamamen örnek: bunları kendi kalibrasyonuna göre değiştir.
+    """
+    if not latest_measurements:
+        return None
+
+    total = 0.0
+    for entry in latest_measurements.values():
+        try:
+            dc = float(entry.get("device_count") or 0)
+        except (TypeError, ValueError):
+            dc = 0.0
+        total += dc
+
+    # ÖRNEK: eşikleri kendin değiştirebilirsin
+    # 0–10  → 1 (çok boş)
+    # 10–20 → 2
+    # 20–35 → 3
+    # 35–50 → 4
+    # 50+   → 5 (çok dolu)
+    if total < 21:
+        return 1
+    elif total < 41:
+        return 2
+    elif total < 61:
+        return 3
+    elif total < 81:
+        return 4
+    else:
+        return 5
+
+
+# -------------------------------------------------------------------
+# Yardımcı: E-mail gönderme (şimdilik stub, gerçek SMTP / provider ekleyebilirsin)
+# -------------------------------------------------------------------
+def send_email(to_email: str, subject: str, body: str):
+    """
+    Buraya gerçek SMTP veya bir e-mail provider (Sendgrid, Mailgun vs.) entegre edebilirsin.
+    Şimdilik sadece log basıyor.
+    """
+    print("\n=== E-MAIL GÖNDERİLİYOR ===")
+    print("To:", to_email)
+    print("Subject:", subject)
+    print("Body:\n", body)
+    print("=== /E-MAIL ===\n")
+
+
+# -------------------------------------------------------------------
+# ESP32 ölçüm endpoint'i
+# -------------------------------------------------------------------
 @app.route("/api/measure", methods=["POST"])
 def measure():
     """
@@ -72,6 +130,9 @@ def latest():
     return jsonify(latest_measurements)
 
 
+# -------------------------------------------------------------------
+# Alert oluşturma endpoint'i
+# -------------------------------------------------------------------
 @app.route("/api/alerts", methods=["POST"])
 def create_alert():
     """
@@ -81,6 +142,7 @@ def create_alert():
         "hours": <number>,          # slider'dan (1–8)
         "email": "kullanici@... "
     }
+    Bina için o anki "kademe"yi starting_level olarak kaydeder.
     """
     global _next_alert_id
 
@@ -112,6 +174,10 @@ def create_alert():
     now = time.time()
     expires_at = now + hours * 3600  # saniye
 
+    starting_level = compute_building_level()
+    # Ölçüm yoksa None dönebilir; o durumda ilk check'te current_level'i starting_level olarak set edebilirsin.
+    # Şimdilik direkt kaydediyoruz.
+
     alert = {
         "id": _next_alert_id,
         "email": email,
@@ -120,6 +186,7 @@ def create_alert():
         "expires_at": expires_at,
         "is_active": True,
         "triggered_at": None,
+        "starting_level": starting_level,
     }
     _next_alert_id += 1
 
@@ -138,6 +205,89 @@ def create_alert():
 def list_alerts():
     """
     Debug/test için: kayıtlı tüm alert'leri döndürür.
-    (Prod'da kapatmak isteyebilirsin.)
+    Prod'da kapatmak isteyebilirsin.
     """
     return jsonify(alerts)
+
+
+# -------------------------------------------------------------------
+# Her 10 dakikada bir alert'leri kontrol eden fonksiyon
+# -------------------------------------------------------------------
+def check_alerts_loop():
+    """
+    Sonsuz döngü:
+    - her 10 dakikada bir aktif alert'lere bakar
+    - eğer alert hala geçerliyse (expires_at > now)
+      ve bina kademesi, starting_level'den EN AZ 1 düşükse
+      e-mail gönderir ve alert'i listeden çıkarır.
+    """
+    global alerts
+
+    while True:
+        try:
+            now = time.time()
+            current_level = compute_building_level()
+
+            # Ölçüm yoksa kontrol etmenin anlamı yok; direkt pas geç
+            if current_level is None:
+                print("[AlertChecker] Henüz ölçüm yok, bekleniyor...")
+            else:
+                print(f"[AlertChecker] Mevcut kademe: {current_level}, aktif alert sayısı: {len(alerts)}")
+
+                new_alerts = []
+                for alert in alerts:
+                    # Zaten tetiklenmiş veya süresi geçmişleri atla
+                    if not alert.get("is_active", True):
+                        continue
+                    if now > alert["expires_at"]:
+                        print(f"[AlertChecker] Alert süresi doldu, siliyorum: id={alert['id']}")
+                        continue
+
+                    starting_level = alert.get("starting_level")
+                    # Eğer starting_level yoksa, ilk gördüğümüz anda set edelim
+                    if starting_level is None:
+                        starting_level = current_level
+                        alert["starting_level"] = starting_level
+
+                    # En az 1 kademe azaldı mı?
+                    if current_level <= starting_level - 1:
+                        # E-mail gönder
+                        subject = "bib. – Deine Bibliothek ist ruhiger geworden"
+                        body = (
+                            f"Hallo,\n\n"
+                            f"Die aktuelle Auslastung hat sich von Level {starting_level} "
+                            f"auf Level {current_level} reduziert (mindestens 1 Stufe).\n"
+                            f"Du hast einen Alert für die nächsten {alert['hours']} Stunden gesetzt.\n\n"
+                            f"Viele Grüße\n"
+                            f"bib."
+                        )
+                        send_email(alert["email"], subject, body)
+
+                        alert["is_active"] = False
+                        alert["triggered_at"] = now
+                        print(f"[AlertChecker] Alert tetiklendi ve silindi: id={alert['id']}")
+                        # Bu alert'i listede tutmuyoruz (tek seferlik)
+                        continue
+
+                    # Hâlâ aktif ama tetiklenmedi: listede tut
+                    new_alerts.append(alert)
+
+                alerts = new_alerts
+
+        except Exception as e:
+            # Hata olsa bile loop'un tamamen ölmemesi için
+            print("[AlertChecker] Hata:", e)
+
+        # 1 dakika bekle
+        time.sleep(60)
+
+
+# Uygulama başlarken alert kontrol thread'ini başlat
+def start_background_worker():
+    t = threading.Thread(target=check_alerts_loop, daemon=True)
+    t.start()
+
+
+start_background_worker()
+
+# app.run() YOK – cloud ortamında gunicorn main:app ile çalıştırılacak
