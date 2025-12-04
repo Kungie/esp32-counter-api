@@ -94,7 +94,7 @@ def send_email(to_email: str, subject: str, body: str):
             "Content-Type": "application/json"
         },
         json={
-            "from": "bib <onboarding@resend.dev>",
+            "from": "bib <no-reply@bib-app.com>",
             "to": to_email,
             "subject": subject,
             "html": html_body
