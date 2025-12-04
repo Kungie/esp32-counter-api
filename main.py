@@ -1,15 +1,31 @@
 from flask import Flask, request, jsonify
 import time
+import re
 
 app = Flask(__name__)
 
 # Her sensor_id için EN SON ölçümü tutan sözlük
-# Örnek içerik:
 # {
 #   "esp32-sniffer-1": {"device_count": 24, "time": 1764584000},
-#   "esp32-sniffer-2": {"device_count": 31, "time": 1764584102},
+#   ...
 # }
 latest_measurements = {}
+
+# Basit alert listesi (in-memory)
+# Her eleman:
+# {
+#   "id": 1,
+#   "email": "kisi@example.com",
+#   "hours": 3,
+#   "created_at": 1700000000.0,
+#   "expires_at": 1700010800.0,
+#   "is_active": True,
+#   "triggered_at": None
+# }
+alerts = []
+_next_alert_id = 1
+
+EMAIL_REGEX = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 
 
 @app.route("/api/measure", methods=["POST"])
@@ -56,4 +72,72 @@ def latest():
     return jsonify(latest_measurements)
 
 
-# app.run() YOK – cloud ortamında gunicorn main:app ile çalıştırılacak
+@app.route("/api/alerts", methods=["POST"])
+def create_alert():
+    """
+    Frontend'den gelen e-mail alarm isteğini kaydeder.
+    Beklenen JSON:
+    {
+        "hours": <number>,          # slider'dan (1–8)
+        "email": "kullanici@... "
+    }
+    """
+    global _next_alert_id
+
+    data = request.get_json(silent=True) or {}
+
+    email = (data.get("email") or "").strip()
+    hours = data.get("hours")
+
+    # Basit validasyon
+    if not email:
+        return jsonify({"status": "error", "message": "email_required"}), 400
+
+    if not EMAIL_REGEX.match(email):
+        return jsonify({"status": "error", "message": "invalid_email"}), 400
+
+    try:
+        hours = int(hours)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "invalid_hours"}), 400
+
+    if hours < 1 or hours > 8:
+        return jsonify({
+            "status": "error",
+            "message": "hours_out_of_range",
+            "allowed_min": 1,
+            "allowed_max": 8
+        }), 400
+
+    now = time.time()
+    expires_at = now + hours * 3600  # saniye
+
+    alert = {
+        "id": _next_alert_id,
+        "email": email,
+        "hours": hours,
+        "created_at": now,
+        "expires_at": expires_at,
+        "is_active": True,
+        "triggered_at": None,
+    }
+    _next_alert_id += 1
+
+    alerts.append(alert)
+
+    print("Yeni alert kaydedildi:", alert)
+
+    return jsonify({
+        "status": "ok",
+        "alert_id": alert["id"],
+        "expires_at": expires_at
+    }), 201
+
+
+@app.route("/api/alerts", methods=["GET"])
+def list_alerts():
+    """
+    Debug/test için: kayıtlı tüm alert'leri döndürür.
+    (Prod'da kapatmak isteyebilirsin.)
+    """
+    return jsonify(alerts)
